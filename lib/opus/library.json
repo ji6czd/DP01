@@ -1,0 +1,22 @@
+{
+  "name": "opus",
+  "version": "1.5.2",
+  "description": "libopus 1.5.2 decoder-only, fixed-point (vendored, see README.md)",
+  "license": "BSD-3-Clause",
+  "build": {
+    "srcDir": ".",
+    "srcFilter": ["+<celt/*.c>", "+<silk/*.c>", "+<src/*.c>"],
+    "includeDir": "include",
+    "extraScript": "pio_build.py",
+    "flags": [
+      "-DOPUS_BUILD",
+      "-DFIXED_POINT",
+      "-DDISABLE_FLOAT_API",
+      "-DVAR_ARRAYS",
+      "-DHAVE_LRINT",
+      "-DHAVE_LRINTF",
+      "-Wno-unused-parameter",
+      "-Wno-unused-variable"
+    ]
+  }
+}
