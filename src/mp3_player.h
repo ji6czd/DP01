@@ -31,3 +31,8 @@ void mp3PlayerHeadingLevelDown();
 
 // 再生⇔一時停止。再開は停止した位置の続きから。
 void mp3PlayerTogglePause();
+
+// 再生速度を1段遅く/速くする(config::kPlaybackSpeeds、両端で止まる)。音程は変わらない。
+// 再生位置はそのままで、変更はリングバッファに積まれている分(100〜200ms程度)の後から効く。
+void mp3PlayerSlower();
+void mp3PlayerFaster();

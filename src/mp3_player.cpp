@@ -11,6 +11,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
 #include <freertos/task.h>
+#include <sonic.h>
 
 #include <algorithm>
 #include <cstdint>
@@ -35,6 +36,8 @@ enum class Command : uint8_t {
   kLevelUp,
   kLevelDown,
   kTogglePause,
+  kSlower,
+  kFaster,
 };
 
 // プレーヤタスクの状態。onPcm()もデコーダ経由で同じタスクから呼ばれるので排他は不要。
@@ -99,6 +102,78 @@ void emitFrames(const int16_t* pcm, size_t frames, int nChans, uint32_t rate) {
   }
 }
 
+// 話速変換(Sonic)。クリップから切り出したPCMはここを通してから出力する。音程を保った
+// まま速度だけを変える。ストリームはサンプルレート/チャンネル数が変わったときだけ作り直す。
+// 内部に最大で約2ピッチ周期分(65Hzで約30ms)の入力を溜めるが、自然なクリップ/SMILの
+// 継ぎ目ではそのまま次の音声へ繋げて鳴らす(位置の追跡はs_posSamplesで元のPCM側を数える)。
+sonicStream s_sonic = nullptr;
+uint32_t s_sonicRate = 0;
+int s_sonicChans = 0;
+size_t s_speedIndex = config::kPlaybackSpeedDefault;
+
+// Sonicからの取り出し1回あたりのフレーム数。
+constexpr size_t kSonicReadFrames = 256;
+int16_t s_sonicOut[kSonicReadFrames * 2];
+
+float currentSpeed() { return config::kPlaybackSpeeds[s_speedIndex]; }
+
+// Sonicの出力に溜まった分を全部出力する。
+void drainSonicOutput() {
+  int n;
+  while ((n = sonicReadShortFromStream(s_sonic, s_sonicOut, kSonicReadFrames)) >
+         0) {
+    emitFrames(s_sonicOut, static_cast<size_t>(n), s_sonicChans, s_sonicRate);
+  }
+}
+
+// Sonicの入力に溜まった残りも変換して出し切る(本の終わり、フォーマットが変わる前)。
+void flushSonic() {
+  if (s_sonic == nullptr) {
+    return;
+  }
+  sonicFlushStream(s_sonic);
+  drainSonicOutput();
+}
+
+// Sonicに溜まった旧位置のPCMを鳴らさずに捨てる(ユーザ操作で再生位置が飛ぶとき)。
+// 内部状態を空に戻すAPIが無いので、flushで出し切って読み捨てる。
+void discardSonic() {
+  if (s_sonic == nullptr) {
+    return;
+  }
+  sonicFlushStream(s_sonic);
+  while (sonicReadShortFromStream(s_sonic, s_sonicOut, kSonicReadFrames) > 0) {
+  }
+}
+
+// frames個のフレームを現在の速度に変換して出力する。
+void emitSpeech(const int16_t* pcm, size_t frames, int nChans, uint32_t rate) {
+  if (rate != s_sonicRate || nChans != s_sonicChans) {
+    flushSonic();  // 旧フォーマットの残りは旧フォーマットのまま鳴らし切る
+    if (s_sonic != nullptr) {
+      sonicDestroyStream(s_sonic);
+    }
+    s_sonic = sonicCreateStream(static_cast<int>(rate), nChans);
+    s_sonicRate = rate;
+    s_sonicChans = nChans;
+    if (s_sonic == nullptr) {
+      LOGE("sonic create failed (%u Hz, %d ch), speed control disabled",
+           static_cast<unsigned>(rate), nChans);
+    } else {
+      sonicSetSpeed(s_sonic, currentSpeed());
+      LOGI("sonic %u Hz, %d ch", static_cast<unsigned>(rate), nChans);
+    }
+  }
+  if (s_sonic == nullptr) {
+    emitFrames(pcm, frames, nChans, rate);  // 作れなければ等速で素通し
+    return;
+  }
+  if (!sonicWriteShortToStream(s_sonic, pcm, static_cast<int>(frames))) {
+    LOGE("sonic write failed (out of memory)");
+  }
+  drainSonicOutput();
+}
+
 void logClip(const char* what) {
   const SmilClip& c = s_book.clips[s_clipIndex];
   LOGI("%s clip %u/%u %s %u-%d ms", what,
@@ -116,6 +191,7 @@ void finishSmil() {
   } else {
     s_state = State::kFinished;
     LOGI("finished");
+    flushSonic();              // 本の最後の数十msがSonicに残らないよう出し切る
     bookmarkRemove(s_bookId);  // 読み終えた本は次回また先頭から
   }
 }
@@ -176,7 +252,7 @@ void onPcm(MP3FrameInfo& info, short* pcm, size_t pcmLen, void*) {
     // curがendを越えていることもある(1ブロックが複数クリップにまたがる場合)ので0で下限をとる。
     const size_t n = static_cast<size_t>(std::max<int64_t>(
         0, std::min<int64_t>(end - cur, static_cast<int64_t>(frames - from))));
-    emitFrames(pcm + from * nChans, n, nChans, rate);
+    emitSpeech(pcm + from * nChans, n, nChans, rate);
     from += n;
     if (cur + static_cast<int64_t>(n) >= end && !advanceClip()) {
       return;  // 以降のフレームは次クリップのものではないので捨てる
@@ -295,6 +371,7 @@ void startClip(size_t index, bool flushAudio) {
   if (flushAudio) {
     // Flush後はResumeまでenqueueが捨てられるので、デコーダのend()が吐く旧クリップの残りも鳴らない。
     i2sSpeakerFlush();
+    discardSonic();
   }
   s_state = State::
       kSeeking;  // end()が内部バッファの残りをonPcmへ吐くので、その分は無視する
@@ -367,6 +444,7 @@ bool playSmil(size_t smilIndex, const char* fragment, bool flushAudio,
               bool startAtLastClip = false, int startClipIndex = -1) {
   if (flushAudio) {
     i2sSpeakerFlush();
+    discardSonic();
   }
   s_state = State::kSeeking;
   s_decoder
@@ -522,6 +600,19 @@ void changeHeadingLevel(int delta) {
   LOGI("heading level H%u", static_cast<unsigned>(s_headingLevel));
 }
 
+// 再生速度をconfig::kPlaybackSpeedsの段階でdelta段動かす。両端では止まる。
+// Sonicはこれ以降に書き込む入力から新しい速度を使う(再生位置は変わらない)。
+void stepSpeed(int delta) {
+  const int index =
+      std::clamp(static_cast<int>(s_speedIndex) + delta, 0,
+                 static_cast<int>(config::kPlaybackSpeedCount) - 1);
+  s_speedIndex = static_cast<size_t>(index);
+  if (s_sonic != nullptr) {
+    sonicSetSpeed(s_sonic, currentSpeed());
+  }
+  LOGI("speed x%.2f", static_cast<double>(currentSpeed()));
+}
+
 // ユーザ操作によるフレーズ(クリップ)送り。
 // SMILの最後のクリップの次は次のSMILの先頭へ、SMILの先頭クリップの前は前のSMILの最後の
 // クリップへ。本の最初の前は先頭クリップの頭出し、本の最後の次は何もしない。
@@ -587,6 +678,12 @@ void playerTaskFn(void*) {
           break;
         case Command::kLevelDown:
           changeHeadingLevel(+1);
+          break;
+        case Command::kSlower:
+          stepSpeed(-1);
+          break;
+        case Command::kFaster:
+          stepSpeed(+1);
           break;
         case Command::kTogglePause:
           s_paused = !s_paused;
@@ -712,3 +809,5 @@ void mp3PlayerHeadingStart() { sendCommand(Command::kHeadingStart); }
 void mp3PlayerHeadingLevelUp() { sendCommand(Command::kLevelUp); }
 void mp3PlayerHeadingLevelDown() { sendCommand(Command::kLevelDown); }
 void mp3PlayerTogglePause() { sendCommand(Command::kTogglePause); }
+void mp3PlayerSlower() { sendCommand(Command::kSlower); }
+void mp3PlayerFaster() { sendCommand(Command::kFaster); }

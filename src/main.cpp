@@ -40,6 +40,12 @@ void handleKeyEvent(const KeyEvent& keyEvent) {
       case config::kKeyPlayStop:
         mp3PlayerTogglePause();
         break;
+      case config::kKeySlower:
+        mp3PlayerSlower();
+        break;
+      case config::kKeyFaster:
+        mp3PlayerFaster();
+        break;
     }
   }
 }
