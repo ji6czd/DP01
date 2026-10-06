@@ -14,126 +14,494 @@
 
 #include <algorithm>
 #include <cstdint>
-#include <vector>
+#include <cstring>
+#include <string>
 
 #include "config.h"
 #include "i2s_speaker.h"
 #include "log_config.h"
+#include "ncc_parser.h"
+#include "smil_parser.h"
 
 namespace {
 
-enum class Command : uint8_t { kPrev, kNext, kTogglePause };
+enum class Command : uint8_t {
+  kPrevPhrase,
+  kNextPhrase,
+  kPrevHeading,
+  kNextHeading,
+  kHeadingStart,
+  kTogglePause,
+};
+
+// プレーヤタスクの状態。onPcm()もデコーダ経由で同じタスクから呼ばれるので排他は不要。
+enum class State : uint8_t {
+  kSeeking,  // シーク/オープン中。この間にデコーダが吐くPCM(end()の残り等)は捨てる
+  kPlaying,      // クリップを再生中
+  kJumpPending,  // 現在クリップが終わり、次(s_clipIndex)は連続していない。タスクがstartClip()する
+  kNextSmil,     // 現在のSMILが終わり、次のSMILがある。タスクが読み込んで始める
+  kFinished,     // 本の最後まで再生した/エラー
+};
 
 QueueHandle_t s_commandQueue = nullptr;
 String s_directory;
-std::vector<String> s_tracks;
-size_t s_trackIndex = 0;
-File s_file;
+NccBook s_ncc;           // 本全体(SMILの再生順と見出し)
+SmilBook s_book;         // 今再生中のSMIL
+size_t s_smilIndex = 0;  // s_ncc.smilsの添字(s_bookの元)
+size_t s_clipIndex = 0;  // s_book.clipsの添字。デコーダが処理中のクリップ
+State s_state = State::kFinished;
 bool s_paused = false;
+
+File s_file;
+int s_openSource = -1;       // s_fileが開いているSmilBook::sourcesの添字
+uint32_t s_dataStart = 0;    // 最初のフレーム同期の位置(ID3v2タグの後)
+uint32_t s_bytesPerSec = 0;  // CBR前提のバイト/秒
+
 libhelix::MP3DecoderHelix s_decoder;
 uint8_t s_readBuf[config::kMp3ReadChunkBytes];
+
+// デコード位置(ファイル先頭からのサンプル数)。シーク時はs_baseMsから始め、レートは最初の
+// PCMで分かるのでs_needInitでその時に初期化する。
+uint32_t s_baseMs = 0;
+bool s_needInit = false;
+int64_t s_posSamples = 0;
 
 // モノ→ステレオ複製用。1回のenqueueあたりのステレオフレーム数。
 constexpr size_t kStereoChunkFrames = 256;
 int16_t s_stereoBuf[kStereoChunkFrames * 2];
 
-// Helixのデコード結果。pcmLenはチャンネルを含む総サンプル数(info.outputSamps)。
+int64_t msToSamples(uint32_t ms, uint32_t rate) {
+  return static_cast<int64_t>(ms) * rate / 1000;
+}
+
+// frames個のフレーム(チャンネルあたり1サンプル)を出力する。
 // i2s_speakerはLRインターリーブのステレオを期待するので、モノは左右へ複製する。
-void onPcm(MP3FrameInfo& info, short* pcm, size_t pcmLen, void*) {
-  const uint32_t rate = static_cast<uint32_t>(info.samprate);
-  if (info.nChans == 2) {
-    i2sSpeakerEnqueue(pcm, pcmLen, rate);
+void emitFrames(const int16_t* pcm, size_t frames, int nChans, uint32_t rate) {
+  if (nChans == 2) {
+    i2sSpeakerEnqueue(pcm, frames * 2, rate);
     return;
   }
   size_t pos = 0;
-  while (pos < pcmLen) {
-    const size_t frames = std::min(kStereoChunkFrames, pcmLen - pos);
-    for (size_t i = 0; i < frames; i++) {
+  while (pos < frames) {
+    const size_t n = std::min(kStereoChunkFrames, frames - pos);
+    for (size_t i = 0; i < n; i++) {
       s_stereoBuf[i * 2] = pcm[pos + i];
       s_stereoBuf[i * 2 + 1] = pcm[pos + i];
     }
-    i2sSpeakerEnqueue(s_stereoBuf, frames * 2, rate);
-    pos += frames;
+    i2sSpeakerEnqueue(s_stereoBuf, n * 2, rate);
+    pos += n;
   }
 }
 
-// directory直下のa*.mp3を名前順に列挙してs_tracksへ入れる。openTrack()のためdirectoryはs_directoryに保持する。
-bool buildPlaylist(const char* directory) {
-  s_directory = directory;
-  s_tracks.clear();
-  File dir = SD.open(directory);
-  if (!dir || !dir.isDirectory()) {
-    LOGE("directory not found: %s", directory);
+void logClip(const char* what) {
+  const SmilClip& c = s_book.clips[s_clipIndex];
+  LOGI("%s clip %u/%u %s %u-%d ms", what,
+       static_cast<unsigned>(s_clipIndex + 1),
+       static_cast<unsigned>(s_book.clips.size()),
+       s_book.sources[c.srcIndex].c_str(), static_cast<unsigned>(c.beginMs),
+       c.endMs == kSmilClipToEnd ? -1 : static_cast<int>(c.endMs));
+}
+
+// 現在のSMILの再生が終わった(最終クリップの終端、またはEOF)。
+// 次のSMILがあればkNextSmil、本の最後ならkFinishedにする。
+void finishSmil() {
+  if (s_smilIndex + 1 < s_ncc.smils.size()) {
+    s_state = State::kNextSmil;
+  } else {
+    s_state = State::kFinished;
+    LOGI("finished");
+  }
+}
+
+// 現在クリップの再生が終わった。次クリップへ進み、そのまま流せるならtrueを返す。
+// SMILの最後ならfinishSmil()、同一ファイルでも遠い/戻る場合はkJumpPendingにしてfalseを返す。
+bool advanceClip() {
+  const SmilClip prev = s_book.clips[s_clipIndex];
+  if (s_clipIndex + 1 >= s_book.clips.size()) {
+    finishSmil();
     return false;
   }
-  for (File f = dir.openNextFile(); f; f = dir.openNextFile()) {
-    if (f.isDirectory()) {
-      continue;
-    }
-    String name = f.name();  // 新しいコアではパスを含まないファイル名
-    name.toLowerCase();
-    if (name.length() > 0 && name[0] == config::kMp3FilePrefix &&
-        name.endsWith(".mp3")) {
-      s_tracks.push_back(String(f.name()));
-    }
+  s_clipIndex++;
+  const SmilClip& next = s_book.clips[s_clipIndex];
+  const bool sameStream =
+      next.srcIndex == prev.srcIndex && prev.endMs != kSmilClipToEnd &&
+      next.beginMs >= prev.endMs &&
+      next.beginMs - prev.endMs <= config::kMp3SkipThroughMs;
+  if (!sameStream) {
+    s_state = State::kJumpPending;
+    return false;
   }
-  dir.close();
-  std::sort(
-      s_tracks.begin(), s_tracks.end(),
-      [](const String& a, const String& b) { return a.compareTo(b) < 0; });
-  LOGI("%u tracks in %s", static_cast<unsigned>(s_tracks.size()), directory);
-  return !s_tracks.empty();
+  logClip("next");
+  return true;
 }
 
-void closeTrack() {
+// Helixのデコード結果。pcmLenはチャンネルを含む総サンプル数(info.outputSamps)。
+// デコード位置を数え、現在クリップの [clip-begin, clip-end)
+// に入る部分だけを出力する。
+void onPcm(MP3FrameInfo& info, short* pcm, size_t pcmLen, void*) {
+  if (s_state != State::kPlaying) {
+    return;
+  }
+  const int nChans = info.nChans > 0 ? info.nChans : 1;
+  const uint32_t rate = static_cast<uint32_t>(info.samprate);
+  const size_t frames = pcmLen / nChans;
+
+  if (s_needInit) {
+    s_posSamples = msToSamples(s_baseMs, rate);
+    s_needInit = false;
+  }
+  const int64_t blockStart = s_posSamples;
+  s_posSamples += frames;
+
+  size_t from = 0;
+  while (from < frames) {
+    const SmilClip& clip = s_book.clips[s_clipIndex];
+    const int64_t begin = msToSamples(clip.beginMs, rate);
+    const int64_t end = clip.endMs == kSmilClipToEnd
+                            ? INT64_MAX
+                            : msToSamples(clip.endMs, rate);
+    const int64_t cur = blockStart + static_cast<int64_t>(from);
+    if (cur < begin) {  // プリロール/クリップ間の捨て区間
+      from += static_cast<size_t>(
+          std::min<int64_t>(begin - cur, static_cast<int64_t>(frames - from)));
+      continue;
+    }
+    // curがendを越えていることもある(1ブロックが複数クリップにまたがる場合)ので0で下限をとる。
+    const size_t n = static_cast<size_t>(std::max<int64_t>(
+        0, std::min<int64_t>(end - cur, static_cast<int64_t>(frames - from))));
+    emitFrames(pcm + from * nChans, n, nChans, rate);
+    from += n;
+    if (cur + static_cast<int64_t>(n) >= end && !advanceClip()) {
+      return;  // 以降のフレームは次クリップのものではないので捨てる
+    }
+  }
+}
+
+// 先頭のID3v2を飛ばして最初のMPEG Audio Layer
+// IIIフレームヘッダを探し、s_dataStartと s_bytesPerSec(CBR前提)を設定する。
+bool probeMp3(File& f) {
+  static const uint16_t kBitrateKbpsMpeg1[16] = {
+      0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 0};
+  static const uint16_t kBitrateKbpsMpeg2[16] = {
+      0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160, 0};
+  uint8_t buf[512];
+  uint32_t offset = 0;
+  f.seek(0);
+  int n = f.read(buf, sizeof(buf));
+  if (n >= 10 && memcmp(buf, "ID3", 3) == 0) {
+    offset = 10 + ((buf[6] & 0x7f) << 21 | (buf[7] & 0x7f) << 14 |
+                   (buf[8] & 0x7f) << 7 | (buf[9] & 0x7f));
+    f.seek(offset);
+    n = f.read(buf, sizeof(buf));
+  }
+  for (int i = 0; i + 4 <= n; i++) {
+    if (buf[i] != 0xff || (buf[i + 1] & 0xe0) != 0xe0) {
+      continue;
+    }
+    const int version = (buf[i + 1] >> 3) & 3;  // 3=MPEG1, 2=MPEG2, 0=MPEG2.5
+    const int layer = (buf[i + 1] >> 1) & 3;    // 1=Layer III
+    const int bitrateIndex = buf[i + 2] >> 4;
+    if (version == 1 || layer != 1 || bitrateIndex == 0 || bitrateIndex == 15) {
+      continue;
+    }
+    const uint32_t kbps = version == 3 ? kBitrateKbpsMpeg1[bitrateIndex]
+                                       : kBitrateKbpsMpeg2[bitrateIndex];
+    s_dataStart = offset + i;
+    s_bytesPerSec = kbps * 1000 / 8;
+    return true;
+  }
+  return false;
+}
+
+void closeSource() {
   if (s_file) {
     s_file.close();
   }
+  s_openSource = -1;
 }
 
-// s_trackIndexのファイルを開き、デコーダを初期状態にする。
-bool openTrack() {
-  closeTrack();
-  s_decoder.end();
-  String path = s_directory + "/" + s_tracks[s_trackIndex];
+// srcIndexのファイルをs_fileに開く(既に開いていれば何もしない)。
+bool openSource(int srcIndex) {
+  if (s_file && s_openSource == srcIndex) {
+    return true;
+  }
+  closeSource();
+  const String path = s_directory + "/" + s_book.sources[srcIndex].c_str();
   s_file = SD.open(path, FILE_READ);
   if (!s_file) {
     LOGE("open failed: %s", path.c_str());
     return false;
   }
-  s_decoder.begin();
-  LOGI("play [%u/%u] %s (%u bytes)", static_cast<unsigned>(s_trackIndex + 1),
-       static_cast<unsigned>(s_tracks.size()), path.c_str(),
-       static_cast<unsigned>(s_file.size()));
+  if (!probeMp3(s_file)) {
+    LOGE("not an MP3 (Layer III) file: %s", path.c_str());
+    s_file.close();
+    return false;
+  }
+  s_openSource = srcIndex;
+  LOGI("open %s (%u bytes, %u bytes/s, data@%u)", path.c_str(),
+       static_cast<unsigned>(s_file.size()),
+       static_cast<unsigned>(s_bytesPerSec),
+       static_cast<unsigned>(s_dataStart));
   return true;
 }
 
-// ユーザ操作による曲送り。旧曲の残りPCMを捨て、新曲のPCMだけが流れるようにする。
-void changeTrack(int delta) {
-  const size_t n = s_tracks.size();
-  s_trackIndex = (s_trackIndex + n + delta) % n;
-  // Flush後はResumeまでenqueueが捨てられるので、デコーダのend()が吐く旧曲の残りも鳴らない。
-  i2sSpeakerFlush();
-  openTrack();
-  i2sSpeakerResume();
+// indexのクリップを始める。必要ならファイルを開き、クリップ開始のプリロール分手前へ
+// シークしてデコーダを初期化し直す。呼び出し時はstate==kSeekingで、デコーダはend()済み。
+// 成功したらkPlaying、失敗したらkFinishedにする。
+bool beginClip(size_t index) {
+  if (index >= s_book.clips.size()) {
+    LOGE("clip %u out of range", static_cast<unsigned>(index));
+    s_state = State::kFinished;
+    return false;
+  }
+  s_clipIndex = index;
+  const SmilClip& clip = s_book.clips[index];
+
+  bool ok = openSource(clip.srcIndex);
+  if (ok) {
+    const uint32_t startMs = clip.beginMs > config::kMp3SeekPreRollMs
+                                 ? clip.beginMs - config::kMp3SeekPreRollMs
+                                 : 0;
+    // CBR前提でバイト位置を求める。同期語は次のフレーム境界で見つかるので、実際の開始は
+    // 最大1フレーム(約26ms)後ろにずれる(クリップ頭が最大1フレーム遅れうる)。
+    const uint32_t startByte =
+        s_dataStart + static_cast<uint32_t>(static_cast<uint64_t>(startMs) *
+                                            s_bytesPerSec / 1000);
+    ok = s_file.seek(startByte);
+    s_baseMs = startMs;
+  }
+  if (!ok) {
+    s_state = State::kFinished;
+    return false;
+  }
+  s_needInit = true;
+  s_decoder.begin();
+  s_state = State::kPlaying;
+  logClip("start");
+  return true;
+}
+
+// 今のSMILのindexのクリップを再生する。
+// flushAudio=trueはユーザ操作(旧クリップの残りPCMを捨てる)。falseは自然な遷移で、
+// 旧クリップ末尾は切らずに鳴らし切る。
+void startClip(size_t index, bool flushAudio) {
+  if (flushAudio) {
+    // Flush後はResumeまでenqueueが捨てられるので、デコーダのend()が吐く旧クリップの残りも鳴らない。
+    i2sSpeakerFlush();
+  }
+  s_state = State::
+      kSeeking;  // end()が内部バッファの残りをonPcmへ吐くので、その分は無視する
+  s_decoder.end();
+  beginClip(index);
+  if (flushAudio) {
+    i2sSpeakerResume();
+  }
+}
+
+struct FileReader {
+  File* file;
+};
+
+size_t readFileCallback(void* ctx, uint8_t* buf, size_t len) {
+  const int n = static_cast<FileReader*>(ctx)->file->read(buf, len);
+  return n > 0 ? static_cast<size_t>(n) : 0;
+}
+
+// SMILを読んでs_bookへ入れる。クリップが1つも取れなければfalse(s_bookは空になる)。
+bool loadSmil(const String& path) {
+  File f = SD.open(path, FILE_READ);
+  if (!f) {
+    LOGE("SMIL not found: %s", path.c_str());
+    s_book = SmilBook();
+    return false;
+  }
+  const uint32_t heapBefore = ESP.getFreeHeap();
+  const uint32_t t0 = millis();
+  FileReader reader{&f};
+  const bool ok = smilParse(readFileCallback, &reader, f.size(), s_book);
+  const uint32_t elapsed = millis() - t0;
+  LOGI(
+      "SMIL %s: %u clips, %u anchors, %u sources, %u skipped, %u bytes in %u "
+      "ms, heap %u -> %u, stack free min %u",
+      path.c_str(), static_cast<unsigned>(s_book.clips.size()),
+      static_cast<unsigned>(s_book.anchors.size()),
+      static_cast<unsigned>(s_book.sources.size()),
+      static_cast<unsigned>(s_book.skipped), static_cast<unsigned>(f.size()),
+      static_cast<unsigned>(elapsed), static_cast<unsigned>(heapBefore),
+      static_cast<unsigned>(ESP.getFreeHeap()),
+      static_cast<unsigned>(uxTaskGetStackHighWaterMark(nullptr)));
+  f.close();
+  if (!ok) {
+    LOGE("no <audio> clip in %s", path.c_str());
+    s_book = SmilBook();
+  }
+  return ok;
+}
+
+// fragment(ncc.htmlの見出しが指す<text
+// id>)に対応する、今のSMILのクリップの添字。 見つからなければ先頭。
+size_t anchorClip(const std::string& fragment) {
+  if (s_book.clips.empty()) {
+    return 0;
+  }
+  for (const SmilAnchor& a : s_book.anchors) {
+    if (a.id == fragment) {
+      return std::min<size_t>(a.clipIndex, s_book.clips.size() - 1);
+    }
+  }
+  return 0;
+}
+
+// smilIndexのSMILを読み込み、fragment(nullptrなら先頭)から再生を始める。
+// startAtLastClip=trueならfragmentに関わらずSMILの最後のクリップから始める。
+// ユーザ操作(flushAudio=true)ではFlushして旧SMILの残りPCMを捨てる。
+bool playSmil(size_t smilIndex, const char* fragment, bool flushAudio,
+              bool startAtLastClip = false) {
+  if (flushAudio) {
+    i2sSpeakerFlush();
+  }
+  s_state = State::kSeeking;
+  s_decoder
+      .end();  // s_bookを差し替える前に、デコーダの残りをonPcmへ吐かせて捨てる
+  closeSource();
+  s_smilIndex = smilIndex;
+  bool ok = loadSmil(s_directory + "/" + s_ncc.smils[smilIndex].c_str());
+  if (ok) {
+    LOGI("smil %u/%u %s", static_cast<unsigned>(smilIndex + 1),
+         static_cast<unsigned>(s_ncc.smils.size()),
+         s_ncc.smils[smilIndex].c_str());
+    const size_t first = startAtLastClip       ? s_book.clips.size() - 1
+                         : fragment != nullptr ? anchorClip(fragment)
+                                               : 0;
+    ok = beginClip(first);
+  } else {
+    s_state = State::kFinished;
+  }
+  if (flushAudio) {
+    i2sSpeakerResume();
+  }
+  return ok;
+}
+
+// firstから順に、再生できるSMILが見つかるまで試す。無ければ本の終わり。
+void playSmilsFrom(size_t first) {
+  for (size_t i = first; i < s_ncc.smils.size(); i++) {
+    if (playSmil(i, nullptr, false)) {
+      return;
+    }
+    LOGW("skip %s", s_ncc.smils[i].c_str());
+  }
+  s_state = State::kFinished;
+  LOGI("finished");
+}
+
+// 今のクリップを含む見出しの添字。先頭の見出しより前なら-1。
+// 見出しはncc.html順(=SMILの添字が単調非減少)で、同じSMIL内ではアンカーの位置で判定する。
+int currentHeading() {
+  int cur = -1;
+  for (size_t i = 0; i < s_ncc.headings.size(); i++) {
+    const NccHeading& h = s_ncc.headings[i];
+    if (h.smilIndex < s_smilIndex ||
+        (h.smilIndex == s_smilIndex && anchorClip(h.fragment) <= s_clipIndex)) {
+      cur = static_cast<int>(i);
+    }
+  }
+  return cur;
+}
+
+void gotoHeading(size_t index) {
+  const NccHeading& h = s_ncc.headings[index];
+  LOGI("heading %u/%u -> %s#%s", static_cast<unsigned>(index + 1),
+       static_cast<unsigned>(s_ncc.headings.size()),
+       s_ncc.smils[h.smilIndex].c_str(), h.fragment.c_str());
+  if (h.smilIndex == s_smilIndex && !s_book.clips.empty()) {
+    startClip(anchorClip(h.fragment), true);  // 同じSMIL内なら読み込み直さない
+  } else {
+    playSmil(h.smilIndex, h.fragment.c_str(), true);
+  }
+  s_paused = false;
+}
+
+// 見出し単位の移動。delta=-1:前の見出し、+1:次の見出し、0:今の見出しの先頭。
+// 先頭の見出しより前での前は先頭の見出し、最後の見出しでの次は何もしない。
+void stepHeading(int delta) {
+  if (s_ncc.headings.empty()) {
+    LOGI("no headings");
+    return;
+  }
+  const int cur = currentHeading();
+  if (cur < 0 && delta == 0) {  // 最初の見出しより前。SMILの頭へ
+    startClip(0, true);
+    s_paused = false;
+    return;
+  }
+  const int target = cur + delta;
+  if (target >= static_cast<int>(s_ncc.headings.size())) {
+    LOGI("no next heading");
+    return;
+  }
+  gotoHeading(static_cast<size_t>(std::max(target, 0)));
+}
+
+// ユーザ操作によるフレーズ(クリップ)送り。
+// SMILの最後のクリップの次は次のSMILの先頭へ、SMILの先頭クリップの前は前のSMILの最後の
+// クリップへ。本の最初の前は先頭クリップの頭出し、本の最後の次は何もしない。
+void stepPhrase(int delta) {
+  if (s_book.clips.empty()) {
+    return;
+  }
+  const int target = static_cast<int>(s_clipIndex) + delta;
+  if (target >= static_cast<int>(s_book.clips.size())) {
+    if (s_smilIndex + 1 >= s_ncc.smils.size()) {
+      LOGI("no next clip");
+      return;
+    }
+    playSmil(s_smilIndex + 1, nullptr, true);
+  } else if (target < 0 && s_smilIndex > 0) {
+    // 読み込めない(クリップの無い)SMILは飛ばしてさらに前へ。全部だめなら今のSMILへ戻す。
+    const size_t current = s_smilIndex;
+    size_t prev = current;
+    bool ok = false;
+    while (!ok && prev > 0) {
+      prev--;
+      ok = playSmil(prev, nullptr, true, /*startAtLastClip=*/true);
+    }
+    if (!ok) {
+      playSmil(current, nullptr, true);
+    }
+  } else {
+    startClip(static_cast<size_t>(std::max(target, 0)), true);
+  }
   s_paused = false;
 }
 
 void playerTaskFn(void*) {
   vTaskDelay(pdMS_TO_TICKS(config::kMp3StartDelayMs));
-  openTrack();
+  playSmilsFrom(0);
 
   for (;;) {
-    const bool playing = s_file && !s_paused;
+    const bool active = s_state == State::kPlaying ||
+                        s_state == State::kJumpPending ||
+                        s_state == State::kNextSmil;
+    const bool running = active && !s_paused;
     Command cmd;
-    if (xQueueReceive(s_commandQueue, &cmd, playing ? 0 : portMAX_DELAY) ==
+    if (xQueueReceive(s_commandQueue, &cmd, running ? 0 : portMAX_DELAY) ==
         pdTRUE) {
       switch (cmd) {
-        case Command::kPrev:
-          changeTrack(-1);
+        case Command::kPrevPhrase:
+          stepPhrase(-1);
           break;
-        case Command::kNext:
-          changeTrack(+1);
+        case Command::kNextPhrase:
+          stepPhrase(+1);
+          break;
+        case Command::kPrevHeading:
+          stepHeading(-1);
+          break;
+        case Command::kNextHeading:
+          stepHeading(+1);
+          break;
+        case Command::kHeadingStart:
+          stepHeading(0);
           break;
         case Command::kTogglePause:
           s_paused = !s_paused;
@@ -142,7 +510,16 @@ void playerTaskFn(void*) {
       }
       continue;
     }
-    if (!playing) {
+    if (!running) {
+      continue;
+    }
+
+    if (s_state == State::kJumpPending) {
+      startClip(s_clipIndex, false);
+      continue;
+    }
+    if (s_state == State::kNextSmil) {
+      playSmilsFrom(s_smilIndex + 1);
       continue;
     }
 
@@ -151,9 +528,20 @@ void playerTaskFn(void*) {
       s_decoder.write(s_readBuf, n);
       continue;
     }
-    // EOF。末尾のPCMは切らずに(Flushせず)次の曲へ進む。
-    s_trackIndex = (s_trackIndex + 1) % s_tracks.size();
-    openTrack();
+    // EOF。デコーダに残ったフレームを吐かせる(クリップ追跡は有効)。末尾のPCMは切らない。
+    // Helixは内部バッファがMP3_MIN_FRAME_SIZE(1024B)に満たないとデコードせず、最後の書き込み
+    // 後に最大9フレーム(約240ms)が残る。end()のflush()もclearArray()を二重に呼んで1フレームおきに
+    // 読み飛ばすので、そのままでは最終クリップの末尾が欠ける。ゼロを足して通常のデコード経路で
+    // 残りを処理させる(末尾のゼロは同期語が無いので無視される)。
+    static_assert(config::kMp3ReadChunkBytes >= MP3_MIN_FRAME_SIZE,
+                  "padding must reach the decoder's minimum frame buffer size");
+    memset(s_readBuf, 0, sizeof(s_readBuf));
+    s_decoder.write(s_readBuf, sizeof(s_readBuf));
+    s_decoder.end();
+    if (s_state == State::kPlaying) {
+      LOGW("EOF before the end of the last clip");
+      finishSmil();
+    }
   }
 }
 
@@ -161,6 +549,30 @@ void sendCommand(Command cmd) {
   if (s_commandQueue != nullptr) {
     xQueueSend(s_commandQueue, &cmd, 0);  // 満杯なら捨てる
   }
+}
+
+// ncc.htmlを読んでs_nccへ入れる。SMILが1つも取れなければfalse。
+bool loadNcc(const String& path) {
+  File f = SD.open(path, FILE_READ);
+  if (!f) {
+    LOGE("NCC not found: %s", path.c_str());
+    return false;
+  }
+  const uint32_t heapBefore = ESP.getFreeHeap();
+  const uint32_t t0 = millis();
+  FileReader reader{&f};
+  const bool ok = nccParse(readFileCallback, &reader, f.size(), s_ncc);
+  LOGI("NCC %s: %u smils, %u headings, %u bytes in %u ms, heap %u -> %u",
+       path.c_str(), static_cast<unsigned>(s_ncc.smils.size()),
+       static_cast<unsigned>(s_ncc.headings.size()),
+       static_cast<unsigned>(f.size()), static_cast<unsigned>(millis() - t0),
+       static_cast<unsigned>(heapBefore),
+       static_cast<unsigned>(ESP.getFreeHeap()));
+  f.close();
+  if (!ok) {
+    LOGE("no SMIL link in %s", path.c_str());
+  }
+  return ok;
 }
 
 }  // namespace
@@ -172,7 +584,8 @@ bool mp3PlayerBegin() {
     LOGE("SD mount failed (card not inserted?)");
     return false;
   }
-  if (!buildPlaylist(config::kMp3Directory)) {
+  s_directory = config::kBookDirectory;
+  if (!loadNcc(s_directory + "/" + config::kNccFile)) {
     return false;
   }
   s_decoder.setDataCallback(onPcm);
@@ -191,6 +604,9 @@ bool mp3PlayerBegin() {
   return true;
 }
 
-void mp3PlayerPrev() { sendCommand(Command::kPrev); }
-void mp3PlayerNext() { sendCommand(Command::kNext); }
+void mp3PlayerPrevPhrase() { sendCommand(Command::kPrevPhrase); }
+void mp3PlayerNextPhrase() { sendCommand(Command::kNextPhrase); }
+void mp3PlayerPrevHeading() { sendCommand(Command::kPrevHeading); }
+void mp3PlayerNextHeading() { sendCommand(Command::kNextHeading); }
+void mp3PlayerHeadingStart() { sendCommand(Command::kHeadingStart); }
 void mp3PlayerTogglePause() { sendCommand(Command::kTogglePause); }

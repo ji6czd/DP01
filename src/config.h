@@ -258,10 +258,21 @@ inline constexpr int kSdMosiPin = 14;
 inline constexpr int kSdCsPin = 12;
 inline constexpr uint32_t kSdSpiHz = 25000000;
 
-// 再生対象ディレクトリ(SDルートからの絶対パス)。この直下の a*.mp3
-// を名前順に再生する。
-inline constexpr char kMp3Directory[] = "/B4701R04540790";
-inline constexpr char kMp3FilePrefix = 'a';
+// 再生対象のDAISY 2.02図書ディレクトリ(SDルートからの絶対パス)とそのncc.html。
+// ncc.htmlに現れる順にSMILをたどり、各SMILの<audio>(src/clip-begin/clip-end)を
+// 文書順に再生する。
+inline constexpr char kBookDirectory[] = "/B4701R04540790";
+inline constexpr char kNccFile[] = "ncc.html";
+
+// シーク時にクリップ開始位置よりこれだけ手前からデコードを始め、開始位置までのPCMは捨てる。
+// Layer IIIのbit
+// reservoir(最大511バイト。32kbpsで約5フレーム=約130ms)が前フレームを
+// 参照するため、途中から始めた直後の数フレームは正しくデコードできない。
+inline constexpr uint32_t kMp3SeekPreRollMs = 160;
+
+// 同一ファイル内で次クリップの開始が現在のクリップ終端よりこの範囲だけ先なら、シークせず
+// デコードを続けて間のPCMを捨てる(シークより速く、フラッシュも要らない)。
+inline constexpr uint32_t kMp3SkipThroughMs = 500;
 
 // SDから1回に読んでデコーダへ渡すバイト数。i2sSpeakerEnqueue()がリング満杯でブロック
 // するので、読み出しのペースはそれで自然に律速される。
@@ -277,8 +288,11 @@ inline constexpr uint32_t kMp3StartDelayMs = 1500;
 inline constexpr size_t kMp3CommandQueueDepth = 4;
 
 // TCA8418のキー番号(KeyEvent.key)。
-inline constexpr uint8_t kKeyPrevTrack = 4;
-inline constexpr uint8_t kKeyPlayStop = 8;
-inline constexpr uint8_t kKeyNextTrack = 14;
+inline constexpr uint8_t kKeyPrevHeading = 3;   // 前の見出しの先頭へ
+inline constexpr uint8_t kKeyPrevPhrase = 4;    // 前のフレーズ(クリップ)へ
+inline constexpr uint8_t kKeyPlayStop = 7;      // 再生⇔一時停止
+inline constexpr uint8_t kKeyHeadingStart = 8;  // 今の見出しの先頭へ戻る
+inline constexpr uint8_t kKeyNextHeading = 13;  // 次の見出しの先頭へ
+inline constexpr uint8_t kKeyNextPhrase = 14;   // 次のフレーズ(クリップ)へ
 
 }  // namespace config
