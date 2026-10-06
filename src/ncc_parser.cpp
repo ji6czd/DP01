@@ -23,9 +23,7 @@ bool isHeadingTag(const char* tag, size_t len, bool closing) {
   return (h == 'h' || h == 'H') && digit >= '1' && digit <= '6';
 }
 
-bool endsWithSmil(const char* s, size_t len) {
-  return len >= 5 && xmlNameEquals(s + len - 5, 5, ".smil");
-}
+bool endsWithSmil(const char* s, size_t len) { return len >= 5 && xmlNameEquals(s + len - 5, 5, ".smil"); }
 
 // 登録済みならその添字、無ければ追加した添字。上限超えは-1。
 int findOrAddSmil(NccBook& book, const char* name, size_t len) {
@@ -59,8 +57,7 @@ void onTag(void* ctx, const char* tag, size_t len) {
     const char* content = nullptr;
     size_t contentLen = 0;
     if (xmlGetAttr(tag, len, "name", &name, &nameLen) && nameLen == 13 &&
-        xmlNameEquals(name, nameLen, "dc:identifier") &&
-        xmlGetAttr(tag, len, "content", &content, &contentLen)) {
+        xmlNameEquals(name, nameLen, "dc:identifier") && xmlGetAttr(tag, len, "content", &content, &contentLen)) {
       c.book->identifier.assign(content, contentLen);
     }
     return;
@@ -88,8 +85,7 @@ void onTag(void* ctx, const char* tag, size_t len) {
   if (c.headingLevel != 0) {
     const size_t fragStart = fileLen < hrefLen ? fileLen + 1 : hrefLen;
     c.book->headings.push_back(
-        {c.headingLevel, static_cast<uint16_t>(smilIndex),
-         std::string(href + fragStart, hrefLen - fragStart)});
+        {c.headingLevel, static_cast<uint16_t>(smilIndex), std::string(href + fragStart, hrefLen - fragStart)});
   }
 }
 

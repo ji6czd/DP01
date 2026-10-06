@@ -44,8 +44,7 @@ void handleAudio(const char* tag, size_t len, SmilBook& book) {
   uint32_t beginMs = 0;
   uint32_t endMs = kSmilClipToEnd;
   if ((begin != nullptr && !smilParseTime(begin, beginLen, beginMs)) ||
-      (end != nullptr && !smilParseTime(end, endLen, endMs)) ||
-      endMs <= beginMs) {
+      (end != nullptr && !smilParseTime(end, endLen, endMs)) || endMs <= beginMs) {
     book.skipped++;
     return;
   }
@@ -65,8 +64,7 @@ void onTag(void* ctx, const char* tag, size_t len) {
     const char* id = nullptr;
     size_t idLen = 0;
     if (xmlGetAttr(tag, len, "id", &id, &idLen) && idLen > 0) {
-      book.anchors.push_back(
-          {std::string(id, idLen), static_cast<uint32_t>(book.clips.size())});
+      book.anchors.push_back({std::string(id, idLen), static_cast<uint32_t>(book.clips.size())});
     }
   }
 }

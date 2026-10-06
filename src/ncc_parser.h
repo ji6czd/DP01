@@ -11,10 +11,9 @@
 // 見出しの文字列は持たない(表示もTTSも想定しない)。持つのは「どのSMILのどのアンカーか」だけ。
 
 struct NccHeading {
-  uint8_t level;       // 見出しレベル(h1〜h6の1〜6)
-  uint16_t smilIndex;  // NccBook::smilsの添字
-  std::string
-      fragment;  // href="xxx.smil#fragment"のfragment。SMIL内の<text id>と対応
+  uint8_t level;         // 見出しレベル(h1〜h6の1〜6)
+  uint16_t smilIndex;    // NccBook::smilsの添字
+  std::string fragment;  // href="xxx.smil#fragment"のfragment。SMIL内の<text id>と対応
 };
 
 struct NccBook {

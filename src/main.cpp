@@ -16,17 +16,15 @@ namespace {
 i2s_chan_handle_t txHandle = nullptr;
 
 uint8_t clampVolume(int volume) {
-  return static_cast<uint8_t>(std::clamp(volume,
-                                         static_cast<int>(config::kVolumeMin),
-                                         static_cast<int>(config::kVolumeMax)));
+  return static_cast<uint8_t>(
+      std::clamp(volume, static_cast<int>(config::kVolumeMin), static_cast<int>(config::kVolumeMax)));
 }
 
 // 音量をdelta段(config::kVolumeStep単位)動かす。範囲の端では止まる。
 // NVSへの保存はvolumeStoreTick()がデバウンスしてから行う。
 void stepVolume(int delta) {
   const uint8_t current = es8311GetVolume();
-  const uint8_t volume =
-      clampVolume(static_cast<int>(current) + delta * config::kVolumeStep);
+  const uint8_t volume = clampVolume(static_cast<int>(current) + delta * config::kVolumeStep);
   if (volume == current) {
     return;
   }
@@ -84,9 +82,8 @@ void handleKeyEvent(const KeyEvent& keyEvent) {
 void setup() {
   using namespace config;
   Serial.begin(115200);
-  Serial.setTxTimeoutMs(
-      0);     // USB CDCにホストが居なくてもログ出力でタスクをブロックしない
-  logInit();  // 自前タグのランタイムログフィルタを開ける
+  Serial.setTxTimeoutMs(0);  // USB CDCにホストが居なくてもログ出力でタスクをブロックしない
+  logInit();                 // 自前タグのランタイムログフィルタを開ける
   // 範囲外の保存値(範囲を狭めた後など)は範囲内へ寄せる。
   es8311Begin(clampVolume(volumeStoreLoad(kSpeakerVolume)));
   txHandle = es8311CreateI2sTxChannel();

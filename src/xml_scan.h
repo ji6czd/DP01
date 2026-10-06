@@ -30,5 +30,4 @@ bool xmlTagIs(const char* tag, size_t len, const char* name);
 
 // 属性nameの値(引用符の中身)を取り出す。nameは小文字で指定する。値は引用符(" か
 // ')で 囲まれている前提。無ければfalse。
-bool xmlGetAttr(const char* tag, size_t len, const char* name,
-                const char** value, size_t* valueLen);
+bool xmlGetAttr(const char* tag, size_t len, const char* name, const char** value, size_t* valueLen);

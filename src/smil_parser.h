@@ -31,11 +31,10 @@ struct SmilAnchor {
 };
 
 struct SmilBook {
-  std::vector<std::string>
-      sources;  // 重複を除いた音声ファイル名(SMILのsrc属性そのまま)
-  std::vector<SmilClip> clips;      // 文書順
-  std::vector<SmilAnchor> anchors;  // 文書順
-  size_t skipped = 0;               // 解釈できず捨てた<audio>の数
+  std::vector<std::string> sources;  // 重複を除いた音声ファイル名(SMILのsrc属性そのまま)
+  std::vector<SmilClip> clips;       // 文書順
+  std::vector<SmilAnchor> anchors;   // 文書順
+  size_t skipped = 0;                // 解釈できず捨てた<audio>の数
 };
 
 using SmilReadFn = XmlReadFn;

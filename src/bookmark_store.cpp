@@ -30,8 +30,7 @@ struct Header {
   uint16_t reserved;
 };
 
-constexpr size_t kMaxBlobBytes =
-    sizeof(Header) + sizeof(Entry) * config::kBookmarkMax;
+constexpr size_t kMaxBlobBytes = sizeof(Header) + sizeof(Entry) * config::kBookmarkMax;
 static_assert(kMaxBlobBytes < 1984, "must fit in a single NVS page");
 
 struct Table {
@@ -53,8 +52,7 @@ void readTable(Table& t) {
   }
   Header h;
   memcpy(&h, buf, sizeof(h));
-  if (h.version != kVersion || h.count > config::kBookmarkMax ||
-      len != sizeof(Header) + sizeof(Entry) * h.count) {
+  if (h.version != kVersion || h.count > config::kBookmarkMax || len != sizeof(Header) + sizeof(Entry) * h.count) {
     return;
   }
   memcpy(t.entries, buf + sizeof(Header), sizeof(Entry) * h.count);
@@ -67,8 +65,7 @@ void writeTable(const Table& t) {
   memcpy(buf, &h, sizeof(h));
   memcpy(buf + sizeof(Header), t.entries, sizeof(Entry) * t.count);
   s_prefs.begin(kNamespace, /*readOnly=*/false);
-  s_prefs.putBytes(kKeyBookmarks, buf,
-                   sizeof(Header) + sizeof(Entry) * t.count);
+  s_prefs.putBytes(kKeyBookmarks, buf, sizeof(Header) + sizeof(Entry) * t.count);
   s_prefs.end();
 }
 
@@ -84,8 +81,7 @@ int find(const Table& t, uint32_t id) {
 
 // 添字indexのエントリを削除して詰める。
 void erase(Table& t, int index) {
-  memmove(&t.entries[index], &t.entries[index + 1],
-          sizeof(Entry) * (t.count - index - 1));
+  memmove(&t.entries[index], &t.entries[index + 1], sizeof(Entry) * (t.count - index - 1));
   t.count--;
 }
 
@@ -116,8 +112,7 @@ void bookmarkSave(uint32_t id, uint16_t smil, uint16_t clip) {
   t.entries[0] = {id, smil, clip};
   t.count++;
   writeTable(t);
-  LOGI("saved bookmark id=%08X smil=%u clip=%u (%u books)",
-       static_cast<unsigned>(id), static_cast<unsigned>(smil),
+  LOGI("saved bookmark id=%08X smil=%u clip=%u (%u books)", static_cast<unsigned>(id), static_cast<unsigned>(smil),
        static_cast<unsigned>(clip), static_cast<unsigned>(t.count));
 }
 
@@ -130,6 +125,5 @@ void bookmarkRemove(uint32_t id) {
   }
   erase(t, i);
   writeTable(t);
-  LOGI("removed bookmark id=%08X (%u books)", static_cast<unsigned>(id),
-       static_cast<unsigned>(t.count));
+  LOGI("removed bookmark id=%08X (%u books)", static_cast<unsigned>(id), static_cast<unsigned>(t.count));
 }

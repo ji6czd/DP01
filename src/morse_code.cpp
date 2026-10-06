@@ -161,7 +161,7 @@ void morseTaskFn(void* /*param*/) {
     req.text[config::kMorseMaxTextLen - 1] = '\0';  // 念のため
     LOGI("playing \"%s\"", req.text);
 
-        // 残っているものがあったら消去する
+    // 残っているものがあったら消去する
     i2sSpeakerFlush();
     vTaskDelay(pdMS_TO_TICKS(config::kMorseFlushSettleMs));
     i2sSpeakerResume();

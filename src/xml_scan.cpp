@@ -6,9 +6,7 @@ constexpr size_t kReadBufBytes = 512;
 constexpr size_t kTagBufBytes = 256;
 
 bool isSpace(char c) { return c == ' ' || c == '\t' || c == '\r' || c == '\n'; }
-char toLower(char c) {
-  return (c >= 'A' && c <= 'Z') ? static_cast<char>(c + 32) : c;
-}
+char toLower(char c) { return (c >= 'A' && c <= 'Z') ? static_cast<char>(c + 32) : c; }
 
 }  // namespace
 
@@ -73,8 +71,7 @@ bool xmlTagIs(const char* tag, size_t len, const char* name) {
   return xmlNameEquals(tag, xmlTagNameLen(tag, len), name);
 }
 
-bool xmlGetAttr(const char* tag, size_t len, const char* name,
-                const char** value, size_t* valueLen) {
+bool xmlGetAttr(const char* tag, size_t len, const char* name, const char** value, size_t* valueLen) {
   size_t i = xmlTagNameLen(tag, len);
   while (i < len) {
     while (i < len && (isSpace(tag[i]) || tag[i] == '/')) {

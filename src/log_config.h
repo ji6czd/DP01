@@ -124,11 +124,9 @@
 #endif
 
 // IDFの既定書式 "<letter> (<ms>) <tag>: <message>" に合わせてある。
-#define LOG_WRITE_(lvl, letter, fmt, ...)                \
-  esp_log_write(                                         \
-      static_cast<esp_log_level_t>(lvl), LOG_MODULE_TAG, \
-      letter " (%lu) " LOG_MODULE_TAG ": " fmt "\n",     \
-      static_cast<unsigned long>(esp_log_timestamp()), ##__VA_ARGS__)
+#define LOG_WRITE_(lvl, letter, fmt, ...)                                                                         \
+  esp_log_write(static_cast<esp_log_level_t>(lvl), LOG_MODULE_TAG, letter " (%lu) " LOG_MODULE_TAG ": " fmt "\n", \
+                static_cast<unsigned long>(esp_log_timestamp()), ##__VA_ARGS__)
 
 #if LOG_MODULE_LEVEL >= LOG_LEVEL_ERROR
 #define LOGE(fmt, ...) LOG_WRITE_(LOG_LEVEL_ERROR, "E", fmt, ##__VA_ARGS__)
@@ -176,15 +174,13 @@
 #ifdef M5RAJIRU_NDEBUG
 #define ASSERT(cond) ((void)sizeof(cond))
 #else
-#define ASSERT(cond)                                                         \
-  do {                                                                       \
-    if (!(cond)) {                                                           \
-      esp_log_write(ESP_LOG_ERROR, LOG_MODULE_TAG,                           \
-                    "E (%lu) " LOG_MODULE_TAG ": ASSERT(%s) failed %s:%d\n", \
-                    static_cast<unsigned long>(esp_log_timestamp()), #cond,  \
-                    __FILE__, __LINE__);                                     \
-      abort();                                                               \
-    }                                                                        \
+#define ASSERT(cond)                                                                                        \
+  do {                                                                                                      \
+    if (!(cond)) {                                                                                          \
+      esp_log_write(ESP_LOG_ERROR, LOG_MODULE_TAG, "E (%lu) " LOG_MODULE_TAG ": ASSERT(%s) failed %s:%d\n", \
+                    static_cast<unsigned long>(esp_log_timestamp()), #cond, __FILE__, __LINE__);            \
+      abort();                                                                                              \
+    }                                                                                                       \
   } while (0)
 #endif
 
