@@ -24,5 +24,10 @@ void mp3PlayerNextHeading();
 // 今再生している見出しの先頭へ戻って再生する。
 void mp3PlayerHeadingStart();
 
+// 見出し移動(上の3つ)の対象を、H1〜Hnのnで切り替える。Upで浅く(最小H1)、Downで深く
+// (最大H6=全見出し)。再生位置は変わらない。
+void mp3PlayerHeadingLevelUp();
+void mp3PlayerHeadingLevelDown();
+
 // 再生⇔一時停止。再開は停止した位置の続きから。
 void mp3PlayerTogglePause();

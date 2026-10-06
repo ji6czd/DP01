@@ -17,6 +17,7 @@
 #include <cstring>
 #include <string>
 
+#include "bookmark_store.h"
 #include "config.h"
 #include "i2s_speaker.h"
 #include "log_config.h"
@@ -31,6 +32,8 @@ enum class Command : uint8_t {
   kPrevHeading,
   kNextHeading,
   kHeadingStart,
+  kLevelUp,
+  kLevelDown,
   kTogglePause,
 };
 
@@ -46,11 +49,14 @@ enum class State : uint8_t {
 QueueHandle_t s_commandQueue = nullptr;
 String s_directory;
 NccBook s_ncc;           // 本全体(SMILの再生順と見出し)
+uint32_t s_bookId = 0;   // しおりでこの本を特定するID(bookIdOf(s_ncc))
 SmilBook s_book;         // 今再生中のSMIL
 size_t s_smilIndex = 0;  // s_ncc.smilsの添字(s_bookの元)
 size_t s_clipIndex = 0;  // s_book.clipsの添字。デコーダが処理中のクリップ
 State s_state = State::kFinished;
 bool s_paused = false;
+uint8_t s_headingLevel =
+    config::kHeadingLevelDefault;  // 見出し移動の対象はH1〜これ
 
 File s_file;
 int s_openSource = -1;       // s_fileが開いているSmilBook::sourcesの添字
@@ -110,6 +116,7 @@ void finishSmil() {
   } else {
     s_state = State::kFinished;
     LOGI("finished");
+    bookmarkRemove(s_bookId);  // 読み終えた本は次回また先頭から
   }
 }
 
@@ -354,9 +361,10 @@ size_t anchorClip(const std::string& fragment) {
 
 // smilIndexのSMILを読み込み、fragment(nullptrなら先頭)から再生を始める。
 // startAtLastClip=trueならfragmentに関わらずSMILの最後のクリップから始める。
+// startClipIndexが0以上なら、fragmentに関わらずそのクリップ(範囲外なら先頭)から始める。
 // ユーザ操作(flushAudio=true)ではFlushして旧SMILの残りPCMを捨てる。
 bool playSmil(size_t smilIndex, const char* fragment, bool flushAudio,
-              bool startAtLastClip = false) {
+              bool startAtLastClip = false, int startClipIndex = -1) {
   if (flushAudio) {
     i2sSpeakerFlush();
   }
@@ -370,9 +378,13 @@ bool playSmil(size_t smilIndex, const char* fragment, bool flushAudio,
     LOGI("smil %u/%u %s", static_cast<unsigned>(smilIndex + 1),
          static_cast<unsigned>(s_ncc.smils.size()),
          s_ncc.smils[smilIndex].c_str());
-    const size_t first = startAtLastClip       ? s_book.clips.size() - 1
-                         : fragment != nullptr ? anchorClip(fragment)
-                                               : 0;
+    const size_t first =
+        startAtLastClip ? s_book.clips.size() - 1
+        : startClipIndex >= 0 &&
+                static_cast<size_t>(startClipIndex) < s_book.clips.size()
+            ? static_cast<size_t>(startClipIndex)
+        : fragment != nullptr ? anchorClip(fragment)
+                              : 0;
     ok = beginClip(first);
   } else {
     s_state = State::kFinished;
@@ -395,12 +407,51 @@ void playSmilsFrom(size_t first) {
   LOGI("finished");
 }
 
-// 今のクリップを含む見出しの添字。先頭の見出しより前なら-1。
+// 本のID。dc:identifierとSMILファイル名の並びのFNV-1a。ncc.html全体は読み直さない。
+uint32_t bookIdOf(const NccBook& book) {
+  uint32_t h = 2166136261u;
+  auto mix = [&h](const std::string& s) {
+    for (const char ch : s) {
+      h = (h ^ static_cast<uint8_t>(ch)) * 16777619u;
+    }
+    h = (h ^ 0u) * 16777619u;  // 区切り
+  };
+  mix(book.identifier);
+  for (const std::string& smil : book.smils) {
+    mix(smil);
+  }
+  return h;
+}
+
+// しおりがあればそこから、無ければ(読めなければ)本の先頭から再生を始める。
+void resumeFromBookmark() {
+  uint16_t smil = 0;
+  uint16_t clip = 0;
+  if (bookmarkLoad(s_bookId, &smil, &clip) && smil < s_ncc.smils.size()) {
+    LOGI("resume from bookmark smil=%u clip=%u", static_cast<unsigned>(smil),
+         static_cast<unsigned>(clip));
+    if (playSmil(smil, nullptr, false, false, clip)) {
+      return;
+    }
+    LOGW("bookmark unusable, start from the beginning");
+  }
+  playSmilsFrom(0);
+}
+
+// 移動対象(レベルがs_headingLevel以下)の見出しか。
+bool isTargetHeading(size_t i) {
+  return s_ncc.headings[i].level <= s_headingLevel;
+}
+
+// 今のクリップを含む見出しの添字。先頭の見出しより前なら-1。移動対象の見出しだけを見る。
 // 見出しはncc.html順(=SMILの添字が単調非減少)で、同じSMIL内ではアンカーの位置で判定する。
 int currentHeading() {
   int cur = -1;
   for (size_t i = 0; i < s_ncc.headings.size(); i++) {
     const NccHeading& h = s_ncc.headings[i];
+    if (!isTargetHeading(i)) {
+      continue;
+    }
     if (h.smilIndex < s_smilIndex ||
         (h.smilIndex == s_smilIndex && anchorClip(h.fragment) <= s_clipIndex)) {
       cur = static_cast<int>(i);
@@ -424,8 +475,15 @@ void gotoHeading(size_t index) {
 
 // 見出し単位の移動。delta=-1:前の見出し、+1:次の見出し、0:今の見出しの先頭。
 // 先頭の見出しより前での前は先頭の見出し、最後の見出しでの次は何もしない。
+// 対象はレベルがs_headingLevel以下の見出しだけ。
 void stepHeading(int delta) {
-  if (s_ncc.headings.empty()) {
+  int first = -1;  // 最初の対象見出し
+  for (size_t i = 0; i < s_ncc.headings.size() && first < 0; i++) {
+    if (isTargetHeading(i)) {
+      first = static_cast<int>(i);
+    }
+  }
+  if (first < 0) {
     LOGI("no headings");
     return;
   }
@@ -435,12 +493,33 @@ void stepHeading(int delta) {
     s_paused = false;
     return;
   }
-  const int target = cur + delta;
-  if (target >= static_cast<int>(s_ncc.headings.size())) {
-    LOGI("no next heading");
-    return;
+  int target = cur;
+  if (delta != 0) {
+    const int count = static_cast<int>(s_ncc.headings.size());
+    target = -1;
+    for (int i = cur + delta; i >= 0 && i < count; i += delta) {
+      if (isTargetHeading(static_cast<size_t>(i))) {
+        target = i;
+        break;
+      }
+    }
+    if (target < 0) {
+      if (delta > 0) {
+        LOGI("no next heading");
+        return;
+      }
+      target = first;  // 先頭の見出しでの前は、その先頭
+    }
   }
-  gotoHeading(static_cast<size_t>(std::max(target, 0)));
+  gotoHeading(static_cast<size_t>(target));
+}
+
+void changeHeadingLevel(int delta) {
+  const int level = std::clamp(static_cast<int>(s_headingLevel) + delta,
+                               static_cast<int>(config::kHeadingLevelMin),
+                               static_cast<int>(config::kHeadingLevelMax));
+  s_headingLevel = static_cast<uint8_t>(level);
+  LOGI("heading level H%u", static_cast<unsigned>(s_headingLevel));
 }
 
 // ユーザ操作によるフレーズ(クリップ)送り。
@@ -477,7 +556,7 @@ void stepPhrase(int delta) {
 
 void playerTaskFn(void*) {
   vTaskDelay(pdMS_TO_TICKS(config::kMp3StartDelayMs));
-  playSmilsFrom(0);
+  resumeFromBookmark();
 
   for (;;) {
     const bool active = s_state == State::kPlaying ||
@@ -503,9 +582,26 @@ void playerTaskFn(void*) {
         case Command::kHeadingStart:
           stepHeading(0);
           break;
+        case Command::kLevelUp:
+          changeHeadingLevel(-1);
+          break;
+        case Command::kLevelDown:
+          changeHeadingLevel(+1);
+          break;
         case Command::kTogglePause:
           s_paused = !s_paused;
           LOGI("%s", s_paused ? "paused" : "resumed");
+          if (s_paused &&
+              (s_state == State::kPlaying || s_state == State::kJumpPending ||
+               s_state == State::kNextSmil)) {
+            // kNextSmilは次のSMILの先頭を指すようにする(s_clipIndexは今のSMILの最後のまま)
+            if (s_state == State::kNextSmil) {
+              bookmarkSave(s_bookId, static_cast<uint16_t>(s_smilIndex + 1), 0);
+            } else {
+              bookmarkSave(s_bookId, static_cast<uint16_t>(s_smilIndex),
+                           static_cast<uint16_t>(s_clipIndex));
+            }
+          }
           break;
       }
       continue;
@@ -571,6 +667,10 @@ bool loadNcc(const String& path) {
   f.close();
   if (!ok) {
     LOGE("no SMIL link in %s", path.c_str());
+  } else {
+    s_bookId = bookIdOf(s_ncc);
+    LOGI("book id=%08X identifier=\"%s\"", static_cast<unsigned>(s_bookId),
+         s_ncc.identifier.c_str());
   }
   return ok;
 }
@@ -609,4 +709,6 @@ void mp3PlayerNextPhrase() { sendCommand(Command::kNextPhrase); }
 void mp3PlayerPrevHeading() { sendCommand(Command::kPrevHeading); }
 void mp3PlayerNextHeading() { sendCommand(Command::kNextHeading); }
 void mp3PlayerHeadingStart() { sendCommand(Command::kHeadingStart); }
+void mp3PlayerHeadingLevelUp() { sendCommand(Command::kLevelUp); }
+void mp3PlayerHeadingLevelDown() { sendCommand(Command::kLevelDown); }
 void mp3PlayerTogglePause() { sendCommand(Command::kTogglePause); }

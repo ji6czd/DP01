@@ -11,12 +11,15 @@
 // 見出しの文字列は持たない(表示もTTSも想定しない)。持つのは「どのSMILのどのアンカーか」だけ。
 
 struct NccHeading {
+  uint8_t level;       // 見出しレベル(h1〜h6の1〜6)
   uint16_t smilIndex;  // NccBook::smilsの添字
   std::string
       fragment;  // href="xxx.smil#fragment"のfragment。SMIL内の<text id>と対応
 };
 
 struct NccBook {
+  // <meta name="dc:identifier" content="...">の値。無ければ空。
+  std::string identifier;
   // 本の再生順に並べた、重複を除いたSMILファイル名。ncc.html中の<a
   // href>の出現順 (見出し・ページ・グループのどれから参照されたものも含む)。
   std::vector<std::string> smils;

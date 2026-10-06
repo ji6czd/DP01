@@ -40,12 +40,14 @@ inline constexpr uint32_t kDirectTuneTimeoutMs = 2000;
 // のタイムフリージャンプ として解釈する。桁間タイムアウトは
 // kDirectTuneTimeoutMs を流用する。
 inline constexpr uint8_t kDateJumpDigits = 6;
-static_assert(kDateJumpDigits >= kDirectTuneDigits, "shared digit buffer is sized to kDateJumpDigits");
+static_assert(kDateJumpDigits >= kDirectTuneDigits,
+              "shared digit buffer is sized to kDateJumpDigits");
 
 // タイムフリーで遡れる限界(nowからの秒数)。radikoは通常約8日だが、契約により最大30日まで
 // 遡れる。契約有無はAPI応答から判別できないため広い方(30日)に合わせる。7日契約ユーザの
 // 扱いは後日検討。相対シークの遡り限界と日時ジャンプの範囲チェックの両方で使う。
-inline constexpr int32_t kTimefreeMaxAgeSec = 30 * 24 * 3600 - 3600;  // 約30日(1時間の余裕)
+inline constexpr int32_t kTimefreeMaxAgeSec =
+    30 * 24 * 3600 - 3600;  // 約30日(1時間の余裕)
 
 // radikoのmedialist(m3u8)の1セグメント長。ライブ/タイムフリーとも実測で常に5秒
 // (TARGETDURATION=5)。セグメント本数 ⇔ プレイリスト生成URLの l=<秒>
@@ -72,7 +74,8 @@ inline constexpr int kLiveInitialFetchSegments = 3;  // l=15相当(公式と同�
 // 2(旧 l=15 時代の値)では切り替え直後に音切れしたため、それより1本厚い。
 // NHK/ListenRadio(約10秒セグメント)もこの値を使う(エッジから約30秒遅れ)。
 inline constexpr int kLiveStartMarginSegments = 3;
-static_assert(kLiveStartMarginSegments >= 1, "need at least one segment to start playback");
+static_assert(kLiveStartMarginSegments >= 1,
+              "need at least one segment to start playback");
 static_assert(kLiveStartMarginSegments <= kLiveInitialFetchSegments,
               "margin larger than the fetched window just starts at segment 0");
 
@@ -139,7 +142,8 @@ inline constexpr uint32_t kNtpSyncPollIntervalMs = 200;
 // 各デコーダの begin() が実サイズをここと比較し、足りなければ LOGE
 // を出して失敗する (黙って壊れない)。-DHELIX_DISABLE_AAC_SBR
 // を外すときはこの値を 72KB 以上にすること。
-inline constexpr size_t kCodecArenaBytes = 26 * 1024;  // 26,624B(Opus stereo + 104B)
+inline constexpr size_t kCodecArenaBytes =
+    26 * 1024;  // 26,624B(Opus stereo + 104B)
 
 // ネットワーク取得(別コアのタスク)からデコード側へ渡すリングバッファ。中身は
 // [codec 1B][len 2B LE][payload] のレコード列(radio_stream.cpp の
@@ -171,7 +175,8 @@ inline constexpr uint32_t kJcbaReadWaitMs = 100;
 // stack(fetch/decode) で確認できる)。
 inline constexpr uint32_t kFetchTaskStackBytes = 6144;
 inline constexpr int kFetchTaskPriority = 1;
-inline constexpr int kFetchTaskCore = 0;  // Arduinoのloop()は既定でcore1で動くため、別コアに配置する。
+inline constexpr int kFetchTaskCore =
+    0;  // Arduinoのloop()は既定でcore1で動くため、別コアに配置する。
 
 // AACデコード後、I2S書き込み前のPCM(int16,
 // ステレオインターリーブ)のクッション。
@@ -282,6 +287,9 @@ inline constexpr int kMp3TaskCore = 0;
 inline constexpr uint32_t kMp3StartDelayMs = 1500;
 inline constexpr size_t kMp3CommandQueueDepth = 4;
 
+// しおりを保存しておく本の数(直近何冊分か)。NVSの1blob(1ページ=約2KB)に収まる範囲。
+inline constexpr size_t kBookmarkMax = 100;
+
 // TCA8418のキー番号(KeyEvent.key)。
 inline constexpr uint8_t kKeyPrevHeading = 3;   // 前の見出しの先頭へ
 inline constexpr uint8_t kKeyPrevPhrase = 4;    // 前のフレーズ(クリップ)へ
@@ -289,5 +297,14 @@ inline constexpr uint8_t kKeyHeadingStart = 7;  // 今の見出しの先頭へ�
 inline constexpr uint8_t kKeyPlayStop = 8;      // 再生⇔一時停止
 inline constexpr uint8_t kKeyNextHeading = 13;  // 次の見出しの先頭へ
 inline constexpr uint8_t kKeyNextPhrase = 14;   // 次のフレーズ(クリップ)へ
+inline constexpr uint8_t kKeyLevelUp =
+    17;  // 見出し移動の最深レベルを浅く(H6→H1方向)
+inline constexpr uint8_t kKeyLevelDown =
+    18;  // 見出し移動の最深レベルを深く(H1→H6方向)
+
+// 見出し移動の対象はH1〜この値のレベル。6なら全見出し。
+inline constexpr uint8_t kHeadingLevelMin = 1;
+inline constexpr uint8_t kHeadingLevelMax = 6;
+inline constexpr uint8_t kHeadingLevelDefault = 6;
 
 }  // namespace config

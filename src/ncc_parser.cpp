@@ -6,7 +6,7 @@ constexpr size_t kMaxSmils = UINT16_MAX;
 
 struct Context {
   NccBook* book;
-  bool inHeading = false;
+  uint8_t headingLevel = 0;  // 見出しの中なら1〜6、外なら0
 };
 
 bool isHeadingTag(const char* tag, size_t len, bool closing) {
@@ -46,11 +46,23 @@ int findOrAddSmil(NccBook& book, const char* name, size_t len) {
 void onTag(void* ctx, const char* tag, size_t len) {
   Context& c = *static_cast<Context*>(ctx);
   if (isHeadingTag(tag, len, false)) {
-    c.inHeading = true;
+    c.headingLevel = static_cast<uint8_t>(tag[1] - '0');
     return;
   }
   if (isHeadingTag(tag, len, true)) {
-    c.inHeading = false;
+    c.headingLevel = 0;
+    return;
+  }
+  if (xmlTagIs(tag, len, "meta")) {
+    const char* name = nullptr;
+    size_t nameLen = 0;
+    const char* content = nullptr;
+    size_t contentLen = 0;
+    if (xmlGetAttr(tag, len, "name", &name, &nameLen) && nameLen == 13 &&
+        xmlNameEquals(name, nameLen, "dc:identifier") &&
+        xmlGetAttr(tag, len, "content", &content, &contentLen)) {
+      c.book->identifier.assign(content, contentLen);
+    }
     return;
   }
   if (!xmlTagIs(tag, len, "a")) {
@@ -73,10 +85,10 @@ void onTag(void* ctx, const char* tag, size_t len) {
   if (smilIndex < 0) {
     return;
   }
-  if (c.inHeading) {
+  if (c.headingLevel != 0) {
     const size_t fragStart = fileLen < hrefLen ? fileLen + 1 : hrefLen;
     c.book->headings.push_back(
-        {static_cast<uint16_t>(smilIndex),
+        {c.headingLevel, static_cast<uint16_t>(smilIndex),
          std::string(href + fragStart, hrefLen - fragStart)});
   }
 }
@@ -84,6 +96,7 @@ void onTag(void* ctx, const char* tag, size_t len) {
 }  // namespace
 
 bool nccParse(XmlReadFn read, void* ctx, size_t sizeHint, NccBook& out) {
+  out.identifier.clear();
   out.smils.clear();
   out.headings.clear();
   (void)sizeHint;

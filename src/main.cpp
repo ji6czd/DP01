@@ -31,6 +31,12 @@ void handleKeyEvent(const KeyEvent& keyEvent) {
       case config::kKeyHeadingStart:
         mp3PlayerHeadingStart();
         break;
+      case config::kKeyLevelUp:
+        mp3PlayerHeadingLevelUp();
+        break;
+      case config::kKeyLevelDown:
+        mp3PlayerHeadingLevelDown();
+        break;
       case config::kKeyPlayStop:
         mp3PlayerTogglePause();
         break;
@@ -43,8 +49,9 @@ void handleKeyEvent(const KeyEvent& keyEvent) {
 void setup() {
   using namespace config;
   Serial.begin(115200);
-  Serial.setTxTimeoutMs(0);  // USB CDCにホストが居なくてもログ出力でタスクをブロックしない
-  logInit();                 // 自前タグのランタイムログフィルタを開ける
+  Serial.setTxTimeoutMs(
+      0);     // USB CDCにホストが居なくてもログ出力でタスクをブロックしない
+  logInit();  // 自前タグのランタイムログフィルタを開ける
   es8311Begin(kSpeakerVolume);
   txHandle = es8311CreateI2sTxChannel();
   i2sSpeakerBegin(txHandle);
