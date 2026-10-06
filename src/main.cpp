@@ -45,7 +45,6 @@ void setup() {
   Serial.begin(115200);
   Serial.setTxTimeoutMs(0);  // USB CDCにホストが居なくてもログ出力でタスクをブロックしない
   logInit();                 // 自前タグのランタイムログフィルタを開ける
-  delay(1000);               // Wait for serial port to initialize
   es8311Begin(kSpeakerVolume);
   txHandle = es8311CreateI2sTxChannel();
   i2sSpeakerBegin(txHandle);
