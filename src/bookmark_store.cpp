@@ -15,6 +15,7 @@ namespace {
 
 constexpr char kNamespace[] = "m5rajiru";
 constexpr char kKeyBookmarks[] = "bookmarks";
+constexpr char kKeyLastBook[] = "lastbook";
 constexpr uint8_t kVersion = 1;
 
 struct Entry {
@@ -126,4 +127,20 @@ void bookmarkRemove(uint32_t id) {
   erase(t, i);
   writeTable(t);
   LOGI("removed bookmark id=%08X (%u books)", static_cast<unsigned>(id), static_cast<unsigned>(t.count));
+}
+
+std::string lastBookLoad() {
+  Preferences prefs;
+  prefs.begin(kNamespace, /*readOnly=*/true);
+  const String name = prefs.getString(kKeyLastBook, "");
+  prefs.end();
+  return name.c_str();
+}
+
+void lastBookSave(const std::string& name) {
+  Preferences prefs;
+  prefs.begin(kNamespace, /*readOnly=*/false);
+  prefs.putString(kKeyLastBook, name.c_str());
+  prefs.end();
+  LOGI("saved last book %s", name.c_str());
 }

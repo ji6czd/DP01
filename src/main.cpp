@@ -3,11 +3,11 @@
 #include <algorithm>
 
 #include "config.h"
+#include "daisy_player.h"
 #include "es8311.h"
 #include "i2s_speaker.h"
 #include "log_config.h"
 #include "morse_code.h"
-#include "mp3_player.h"
 #include "tca8418.h"
 #include "volume_store.h"
 
@@ -37,35 +37,41 @@ void handleKeyEvent(const KeyEvent& keyEvent) {
   if (keyEvent.state) {
     Serial.printf("key: %02d\n", keyEvent.key);
     switch (keyEvent.key) {
+      case config::kKeyPrevFolder:
+        daisyPlayerPrevBook();
+        break;
+      case config::kKeyNextFolder:
+        daisyPlayerNextBook();
+        break;
       case config::kKeyPrevPhrase:
-        mp3PlayerPrevPhrase();
+        daisyPlayerPrevPhrase();
         break;
       case config::kKeyNextPhrase:
-        mp3PlayerNextPhrase();
+        daisyPlayerNextPhrase();
         break;
       case config::kKeyPrevHeading:
-        mp3PlayerPrevHeading();
+        daisyPlayerPrevHeading();
         break;
       case config::kKeyNextHeading:
-        mp3PlayerNextHeading();
+        daisyPlayerNextHeading();
         break;
       case config::kKeyHeadingStart:
-        mp3PlayerHeadingStart();
+        daisyPlayerHeadingStart();
         break;
       case config::kKeyLevelUp:
-        mp3PlayerHeadingLevelUp();
+        daisyPlayerHeadingLevelUp();
         break;
       case config::kKeyLevelDown:
-        mp3PlayerHeadingLevelDown();
+        daisyPlayerHeadingLevelDown();
         break;
       case config::kKeyPlayStop:
-        mp3PlayerTogglePause();
+        daisyPlayerTogglePause();
         break;
       case config::kKeySlower:
-        mp3PlayerSlower();
+        daisyPlayerSlower();
         break;
       case config::kKeyFaster:
-        mp3PlayerFaster();
+        daisyPlayerFaster();
         break;
       case config::kKeyVolumeDown:
         stepVolume(-1);
@@ -90,7 +96,7 @@ void setup() {
   i2sSpeakerBegin(txHandle);
   morseBegin();
   tca8418Begin();
-  mp3PlayerBegin();
+  daisyPlayerBegin();
   morsePlay("S");
 }
 

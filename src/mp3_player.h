@@ -1,38 +1,61 @@
 #pragma once
 
-// DAISY 2.02の図書(config::kBookDirectory)を、SDカードのMP3から再生する。
-// ncc.htmlに現れる順にSMILをたどり、各SMILの<audio>クリップ(src/clip-begin/clip-end)を
-// 文書順に再生する。SMILの切り替えは自動(最後のSMILの終わりで停止)。
-// 読み出し・デコードは専用タスクが行い、PCMはi2s_speakerへenqueueする(単一プロデューサ)。
-// 操作系はノンブロッキングで、タスクへコマンドを渡すだけ。
+#include <cstdint>
+#include <string>
 
-// SD初期化・ncc.html解析・プレーヤータスク起動。i2sSpeakerBegin()の後に呼ぶこと。
-// SD未挿入・ncc.html/SMIL無しの場合はログを出してfalseを返す(以降の操作APIは何もしない)。
-bool mp3PlayerBegin();
+// MP3の1クリップ(ファイルの[beginMs, endMs)区間)を再生するエンジン。再生だけを受け持つ。
+// DAISYのncc/SMIL・しおり・見出しなど「何をどの順に鳴らすか」は知らない(daisy_playerの仕事)。
+// タスクもコマンドキューも持たない。呼び出し側のタスクが mp3PlayerPump() を回して駆動する。
+// すべての関数は同じタスクから呼ぶこと(排他は取らない)。PCMはi2s_speakerへenqueueする。
 
-// 前/次のフレーズ(クリップ)へ移って再生する(停止中でも再生状態になる)。
-// SMILの先頭クリップでのPrevは前のSMILの最後のクリップへ、SMILの最後のクリップでのNextは
-// 次のSMILの先頭へ。本の最初でのPrevはそのクリップの頭出し、本の最後でのNextは何もしない。
-void mp3PlayerPrevPhrase();
-void mp3PlayerNextPhrase();
+// endMsがこれなら、ファイル末尾まで。
+inline constexpr uint32_t kMp3ClipToEnd = UINT32_MAX;
 
-// 前/次の見出しの先頭へ移って再生する(停止中でも再生状態になる)。
-// 最初の見出しでのPrevはその先頭、最後の見出しでのNextは何もしない。
-void mp3PlayerPrevHeading();
-void mp3PlayerNextHeading();
+struct Mp3Clip {
+  std::string path;  // SD上の絶対パス
+  uint32_t beginMs = 0;
+  uint32_t endMs = kMp3ClipToEnd;
+};
 
-// 今再生している見出しの先頭へ戻って再生する。
-void mp3PlayerHeadingStart();
+// 再生中のクリップが終わったときに呼ばれ、続きのクリップがあればoutへ入れてtrueを返す。
+// falseなら再生は止まり、mp3PlayerPump()がkEndedを返す。mp3PlayerPump()の中(デコーダの
+// コールバック)から呼ばれるので、重い処理(SD読み出しなど)はしないこと。
+using Mp3NextClipFn = bool (*)(Mp3Clip* out);
 
-// 見出し移動(上の3つ)の対象を、H1〜Hnのnで切り替える。Upで浅く(最小H1)、Downで深く
-// (最大H6=全見出し)。再生位置は変わらない。
-void mp3PlayerHeadingLevelUp();
-void mp3PlayerHeadingLevelDown();
+// デコーダの準備。i2sSpeakerBegin()の後に呼ぶ。SDは呼び出し側がマウント済みであること。
+void mp3PlayerBegin(Mp3NextClipFn nextClip);
 
-// 再生⇔一時停止。再開は停止した位置の続きから。
-void mp3PlayerTogglePause();
+// clipを頭から再生する。flushAudio=trueはユーザ操作(旧クリップの残りPCMを捨てて即切替)、
+// falseは自然な遷移(旧クリップ末尾は切らずに鳴らし切る)。開けない/MP3でなければfalse。
+bool mp3PlayerStart(const Mp3Clip& clip, bool flushAudio);
+
+// 再生を止め、鳴りかけの音も捨てる。SMILの読み込みなど時間のかかる処理の前に呼ぶと、
+// 旧位置の音が残らない。
+void mp3PlayerStop();
+
+// 本の最後まで再生し終えたとき、話速変換に残った末尾を出し切る。
+void mp3PlayerFinish();
+
+enum class Mp3PumpResult : uint8_t {
+  kPlaying,  // 再生中(もう一度呼ぶ)
+  kEnded,    // 次のクリップが無く再生が終わった(EOFでクリップの途中で終わった場合も含む)
+  kIdle,     // 何も再生していない
+};
+
+// 1回分(SDから最大kMp3ReadChunkBytes読んでデコード)進める。i2s_speakerのリングが満杯だと
+// ブロックするので、読み出しのペースはそれで律速される。
+Mp3PumpResult mp3PlayerPump();
 
 // 再生速度を1段遅く/速くする(config::kPlaybackSpeeds、両端で止まる)。音程は変わらない。
-// 再生位置はそのままで、変更はリングバッファに積まれている分(100〜200ms程度)の後から効く。
-void mp3PlayerSlower();
-void mp3PlayerFaster();
+// 変更はリングバッファに積まれている分(100〜200ms程度)の後から効く。戻り値は変わったか。
+bool mp3PlayerSlower();
+bool mp3PlayerFaster();
+
+// 今の再生速度(倍率)。
+float mp3PlayerSpeed();
+
+// 合図の音を挟むなど、再生を一度止めて同じ所から続けるための再開位置。今のクリップの
+// コピーで、beginMsを「耳に届いている位置」の見積もり(デコード位置からリングなどの分を
+// 戻した位置。クリップの頭より前には戻らない)にしたもの。止める前(mp3PlayerStop()の前)に
+// 呼び、止めたあとmp3PlayerStart(*out, false)へ渡す。再生中でなければfalse。
+bool mp3PlayerResumePoint(Mp3Clip* out);

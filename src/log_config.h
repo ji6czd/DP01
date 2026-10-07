@@ -74,6 +74,10 @@
 #define LOG_LEVEL_MP3 LOG_LEVEL_INFO
 #endif
 
+#ifndef LOG_LEVEL_DSY  // daisy_player.cpp(ncc/SMILの解析・再生位置の管理・本の選択)
+#define LOG_LEVEL_DSY LOG_LEVEL_INFO
+#endif
+
 #ifndef LOG_LEVEL_RDK  // radiko_client.cpp / radiko_channel_source.cpp
 #define LOG_LEVEL_RDK LOG_LEVEL_INFO
 #endif

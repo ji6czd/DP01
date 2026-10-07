@@ -216,44 +216,14 @@ inline constexpr uint32_t kI2sWriterTaskStackBytes = 4096;
 inline constexpr int kI2sWriterTaskPriority = 2;
 inline constexpr int kI2sWriterTaskCore = 1;
 
-// 欧文モールス符号の通知音(morse_code.cpp)。液晶を持たない端末の状態通知に使う。
-// PCMは実行時に合成してi2s_speakerへ書き込む。合成中はradio_streamを一時停止させる
-// (i2s_speakerは単一プロデューサ前提のため)。
-inline constexpr uint32_t kMorseSampleRateHz = 24000;
-// サイドトーン周波数。kMorseSampleRateHzを割り切る値にすると1周期が整数サンプルに
-// なり、波形テーブルをループさせても継ぎ目のクリックが出ない(24000/750=32)。
-inline constexpr uint32_t kMorseToneHz = 800;
-// 速度(words per minute)。1単位(短点)の長さ = 1200 / WPM ミリ秒。20WPMで60ms。
-inline constexpr uint32_t kMorseWpm = 30;
-// 各トーン要素の頭と尻に掛けるraised-cosineのアタック/リリース長。キークリック抑制。
-inline constexpr uint32_t kMorseRampMs = 5;
-// 合成PCMのint16ピーク振幅(フルスケール32767に対し余裕を持たせる)。ES8311の
-// ハードウェアボリューム(kSpeakerVolume)とは別。実機で聴きながら調整すること。
-inline constexpr int16_t kMorsePeakAmplitude = 13000;
-// i2sSpeakerEnqueue()1回あたりのステレオフレーム数(256フレーム=1KB、
-// kPcmWriterChunkBytesと同じ粒度)。
-inline constexpr size_t kMorseChunkFrames = 256;
-// i2sSpeakerFlush()で旧音声(ラジオ)のPCM末尾を捨て切るのを待つ時間。リング満杯でも
-// kPcmRingBufferBytes分(24kHzステレオで約170ms)なので、それを上回る値にする。
-// この待ちのあとにi2sSpeakerResume()してモールスのenqueueを始める。
-inline constexpr uint32_t kMorseFlushSettleMs = 100;
-// 最終enqueueのあと、末尾が実際に鳴り終えるのを待つ時間(enqueueはバッファ投入で戻る)。
-inline constexpr uint32_t kMorseTailDrainMs = 200;
-// 1回のmorsePlay()で受け付ける最大文字数(終端NUL含む)。超過分は切り捨てる。
-inline constexpr size_t kMorseMaxTextLen = 24;
-// 再生リクエストキューの段数。溢れたリクエストは捨てる。
-inline constexpr size_t kMorseQueueDepth = 2;
-inline constexpr uint32_t kMorseTaskStackBytes = 3072;
-inline constexpr int kMorseTaskPriority = 1;
-inline constexpr int kMorseTaskCore = 1;
-
 // 保存済みのチャンネルが無い(初回起動)場合、および保存値が使えない場合に再生する
 // チャンネルのインデックス(直接選局コードではなく kStations
 // の添字)。0(=リストの先頭 =
 // NHKの1局目、認証不要で常に再生可)なら局一覧がどう変わっても必ず有効。
 inline constexpr int kBootChannelIndex = 0;
 
-// MP3プレーヤー(mp3_player.cpp)。DAISYの音声ファイルをSDカードから順に再生する。
+// DAISYプレーヤー(daisy_player.cpp)とMP3再生エンジン(mp3_player.cpp)。
+// DAISYの音声ファイルをSDカードから順に再生する。
 // SDスロットの配線はCardputer ADV(Cardputerと同じ): SCK=40, MISO=39, MOSI=14,
 // CS=12。
 inline constexpr int kSdSckPin = 40;
@@ -262,10 +232,9 @@ inline constexpr int kSdMosiPin = 14;
 inline constexpr int kSdCsPin = 12;
 inline constexpr uint32_t kSdSpiHz = 25000000;
 
-// 再生対象のDAISY 2.02図書ディレクトリ(SDルートからの絶対パス)とそのncc.html。
+// DAISY 2.02の本のフォルダにあるncc.html。SDルート直下のncc.htmlを持つフォルダが1冊になる。
 // ncc.htmlに現れる順にSMILをたどり、各SMILの<audio>(src/clip-begin/clip-end)を
 // 文書順に再生する。
-inline constexpr char kBookDirectory[] = "/B4701R04540790";
 inline constexpr char kNccFile[] = "ncc.html";
 
 // シーク時にクリップ開始位置よりこれだけ手前からデコードを始め、開始位置までのPCMは捨てる。
@@ -285,28 +254,30 @@ inline constexpr size_t kMp3ReadChunkBytes = 1024;
 // プレーヤータスク。デコーダはcore0(生産側)、I2S書き込みはcore1。
 // 起動直後は morsePlay() のブートcueが鳴り終えるのを待ってから再生を始める
 // (i2s_speakerは単一プロデューサ前提)。
-inline constexpr uint32_t kMp3TaskStackBytes = 10240;
-inline constexpr int kMp3TaskPriority = 1;
-inline constexpr int kMp3TaskCore = 0;
-inline constexpr uint32_t kMp3StartDelayMs = 1500;
-inline constexpr size_t kMp3CommandQueueDepth = 4;
+inline constexpr uint32_t kDaisyTaskStackBytes = 10240;
+inline constexpr int kDaisyTaskPriority = 1;
+inline constexpr int kDaisyTaskCore = 0;
+inline constexpr uint32_t kDaisyStartDelayMs = 1500;
+inline constexpr size_t kDaisyCommandQueueDepth = 4;
 
 // しおりを保存しておく本の数(直近何冊分か)。NVSの1blob(1ページ=約2KB)に収まる範囲。
 inline constexpr size_t kBookmarkMax = 100;
 
 // TCA8418のキー番号(KeyEvent.key)。
-inline constexpr uint8_t kKeyPrevHeading = 3;   // 前の見出しの先頭へ
+inline constexpr uint8_t kKeyPrevFolder = 1;
+inline constexpr uint8_t kKeyNextFolder = 11;
+inline constexpr uint8_t kKeyPrevHeading = 2;   // 前の見出しの先頭へ
+inline constexpr uint8_t kKeyNextHeading = 12;  // 次の見出しの先頭へ
 inline constexpr uint8_t kKeyPrevPhrase = 4;    // 前のフレーズ(クリップ)へ
-inline constexpr uint8_t kKeyHeadingStart = 7;  // 今の見出しの先頭へ戻る
-inline constexpr uint8_t kKeyPlayStop = 8;      // 再生⇔一時停止
-inline constexpr uint8_t kKeySlower = 15;       // 再生速度を1段遅く
-inline constexpr uint8_t kKeyFaster = 16;       // 再生速度を1段速く
-inline constexpr uint8_t kKeyNextHeading = 13;  // 次の見出しの先頭へ
 inline constexpr uint8_t kKeyNextPhrase = 14;   // 次のフレーズ(クリップ)へ
+inline constexpr uint8_t kKeyHeadingStart = 6;  // 今の見出しの先頭へ戻る
+inline constexpr uint8_t kKeyPlayStop = 8;      // 再生⇔一時停止
 inline constexpr uint8_t kKeyLevelUp = 17;      // 見出し移動の最深レベルを浅く(H6→H1方向)
 inline constexpr uint8_t kKeyLevelDown = 18;    // 見出し移動の最深レベルを深く(H1→H6方向)
-inline constexpr uint8_t kKeyVolumeDown = 11;   // 音量を1段下げる
-inline constexpr uint8_t kKeyVolumeUp = 12;     // 音量を1段上げる
+inline constexpr uint8_t kKeyVolumeDown = 21;   // 音量を1段下げる
+inline constexpr uint8_t kKeyVolumeUp = 22;     // 音量を1段上げる
+inline constexpr uint8_t kKeySlower = 15;       // 再生速度を1段遅く
+inline constexpr uint8_t kKeyFaster = 16;       // 再生速度を1段速く
 
 // 見出し移動の対象はH1〜この値のレベル。6なら全見出し。
 inline constexpr uint8_t kHeadingLevelMin = 1;
